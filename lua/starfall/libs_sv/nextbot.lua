@@ -102,7 +102,11 @@ function nextbot_library.create(pos, mdl)
 	nb:SetModel(mdl)
 	nb.instance = instance
 	nb:Spawn()
-	nb:SetCreator(ply)
+
+	if ply ~= SF.Superuser then
+		nb:SetCreator(ply)
+	end
+
 	entList:register(instance, nb)
 
 	if CPPI then nb:CPPISetOwner(ply == SF.Superuser and NULL or ply) end
@@ -114,7 +118,7 @@ end
 function nextbot_library:remove()
 	local nb = nbunwrap(self)
 	checkpermission(instance, nb, "nextbot.remove")
-	entList:remove(instance, nb)
+	entList:remove(nb)
 end
 
 --- Checks if a user can spawn anymore nextbots.

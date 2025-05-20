@@ -10,7 +10,7 @@ local dgetmeta = debug.getmetatable
 local TypeID = TypeID
 local math_Clamp = math.Clamp
 local ENT_META,NPC_META,PHYS_META,PLY_META,VEH_META,WEP_META = FindMetaTable("Entity"),FindMetaTable("NPC"),FindMetaTable("PhysObj"),FindMetaTable("Player"),FindMetaTable("Vehicle"),FindMetaTable("Weapon")
-local Ent_EntIndex,Ent_Fire,Ent_FollowBone,Ent_GetAngles,Ent_GetChildren,Ent_GetClass,Ent_GetCreationID,Ent_GetParent,Ent_GetPos,Ent_GetTable,Ent_IsScripted,Ent_IsValid,Ent_IsWorld,Ent_SetAngles,Ent_SetLocalAngularVelocity,Ent_SetLocalVelocity,Ent_SetParent,Ent_SetPos = ENT_META.EntIndex,ENT_META.Fire,ENT_META.FollowBone,ENT_META.GetAngles,ENT_META.GetChildren,ENT_META.GetClass,ENT_META.GetCreationID,ENT_META.GetParent,ENT_META.GetPos,ENT_META.GetTable,ENT_META.IsScripted,ENT_META.IsValid,ENT_META.IsWorld,ENT_META.SetAngles,ENT_META.SetLocalAngularVelocity,ENT_META.SetLocalVelocity,ENT_META.SetParent,ENT_META.SetPos
+local Ent_EntIndex,Ent_Fire,Ent_FollowBone,Ent_GetAngles,Ent_GetAttachment,Ent_GetBonePosition,Ent_GetChildren,Ent_GetClass,Ent_GetCreationID,Ent_GetParent,Ent_GetPos,Ent_GetTable,Ent_IsScripted,Ent_IsValid,Ent_IsWorld,Ent_SetAngles,Ent_SetLocalAngularVelocity,Ent_SetLocalAngles,Ent_SetLocalPos,Ent_SetLocalVelocity,Ent_SetParent,Ent_SetPos = ENT_META.EntIndex,ENT_META.Fire,ENT_META.FollowBone,ENT_META.GetAngles,ENT_META.GetAttachment,ENT_META.GetBonePosition,ENT_META.GetChildren,ENT_META.GetClass,ENT_META.GetCreationID,ENT_META.GetParent,ENT_META.GetPos,ENT_META.GetTable,ENT_META.IsScripted,ENT_META.IsValid,ENT_META.IsWorld,ENT_META.SetAngles,ENT_META.SetLocalAngularVelocity,ENT_META.SetLocalAngles,ENT_META.SetLocalPos,ENT_META.SetLocalVelocity,ENT_META.SetParent,ENT_META.SetPos
 local function Ent_IsNPC(ent) return dgetmeta(ent)==NPC_META end
 local function Ent_IsPlayer(ent) return dgetmeta(ent)==PLY_META end
 local function Ent_IsVehicle(ent) return dgetmeta(ent)==VEH_META end
@@ -124,8 +124,10 @@ function SF.CallOnRemove(ent, key, func, deferedfunc)
 	removedHooks[ent][key] = {func, deferedfunc}
 end
 function SF.RemoveCallOnRemove(ent, key)
+	local ret = removedHooks[ent][key]
 	removedHooks[ent][key] = nil
 	if next(removedHooks[ent])==nil then removedHooks[ent] = nil end
+	return ret
 end
 
 -------------------------------------------------------------------------------
@@ -317,50 +319,57 @@ setmetatable(SF.LimitObject, SF.LimitObject)
 SF.EntManager = {
 	__index = {
 		register = function(self, instance, ent, onremove)
-			if not self.nocallonremove then
-				local function sf_on_remove()
-					self:onremove(instance, ent)
-					if onremove then onremove() end
-				end
-				ent.sf_on_remove = sf_on_remove
-				SF.CallOnRemove(ent, "entmanager", sf_on_remove)
-			end
-
+			if self.registryByEnt[ent] then return end
+			if self.removeCb then SF.CallOnRemove(ent, self.removeCbName, self.removeCb) end
 			self.entsByInstance[instance][ent] = true
+			self.registryByEnt[ent] = {player = instance.player, instance = instance, onremove = onremove}
 			self:free(instance.player, -1)
 		end,
-		remove = function(self, instance, ent)
-			-- ent:IsValid() used since not all types this class supports are entity
-			if not (ent and ent:IsValid()) then return end
-			if self.nocallonremove then
-				self:onremove(instance, ent)
-			else
-				-- The die function is called the next frame after 'Remove' which is too slow so call it ourself
-				SF.RemoveCallOnRemove(ent, "entmanager")
-				ent.sf_on_remove()
+		unregister = function(self, ent)
+			local register = self.registryByEnt[ent]
+			if not register then return end
+			self.registryByEnt[ent] = nil
+			if self.removeCb then SF.RemoveCallOnRemove(ent, self.removeCbName) end
+			self:free(register.player, 1)
+
+			if register.instance then
+				self.entsByInstance[register.instance][ent] = nil
 			end
-			ent:Remove()
+			if register.onremove then
+				register.onremove(ent)
+			end
 		end,
-		onremove = function(self, instance, ent)
-			self.entsByInstance[instance][ent] = nil
-			self:free(instance.player, 1)
+		remove = function(self, ent)
+			self:unregister(ent)
+			if ent:IsValid() then ent:Remove() end
 		end,
 		clear = function(self, instance)
 			for ent in pairs(self.entsByInstance[instance]) do
-				self:remove(instance, ent)
+				self:remove(ent)
 			end
 		end,
 		deinitialize = function(self, instance, shouldclear)
+			if not rawget(self.entsByInstance, instance) then return end
 			if shouldclear then
 				self:clear(instance)
+			else
+				for ent in pairs(self.entsByInstance[instance]) do
+					self.registryByEnt[ent].instance = nil
+				end
 			end
 			self.entsByInstance[instance] = nil
 		end
 	},
 	__call = function(p, cvarname, limitname, max, maxhelp, scale, nocallonremove)
 		local t = SF.LimitObject(cvarname, limitname, max, maxhelp, scale)
-		t.nocallonremove = nocallonremove or false
 		t.entsByInstance = setmetatable({},{__index = function(t,k) local r = {} t[k]=r return r end})
+		t.registryByEnt = {}
+		if nocallonremove then
+			t.removeCb = false
+		else
+			t.removeCb = function(ent) t:unregister(ent) end
+			t.removeCbName = "entmanager"..cvarname
+		end
 		return setmetatable(t, p)
 	end
 }
@@ -601,41 +610,56 @@ setmetatable(SF.BlockedList, SF.BlockedList)
 
 SF.Parent = {
 	__index = {
-		updateTransform = function(self)
-			self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), Ent_GetPos(self.parent), Ent_GetAngles(self.parent))
-		end,
-
-		applyTransform = function(self)
-			local pos, ang = LocalToWorld(self.pos, self.ang, Ent_GetPos(self.parent), Ent_GetAngles(self.parent))
-			Ent_SetPos(self.ent, pos)
-			Ent_SetAngles(self.ent, ang)
-		end,
-		
 		parentTypes = {
 			entity = {
-				function(self)
+				applyParent = function(self)
 					Ent_SetParent(self.ent, self.parent)
 				end,
-				function(self)
+				removeParent = function(self)
 					Ent_SetParent(self.ent)
-				end
+				end,
+				updateTransform = function(self)
+					self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), Ent_GetPos(self.parent), Ent_GetAngles(self.parent))
+				end,
+				applyTransform = function(self)
+					local pos, ang = LocalToWorld(self.pos, self.ang, Ent_GetPos(self.parent), Ent_GetAngles(self.parent))
+					Ent_SetPos(self.ent, pos)
+					Ent_SetAngles(self.ent, ang)
+				end,
 			},
 			attachment = {
-				function(self)
+				applyParent = function(self)
 					Ent_SetParent(self.ent, self.parent)
-					Ent_Fire(self.ent, "SetParentAttachmentMaintainOffset", self.param, 0.01)
+					Ent_Fire(self.ent, "SetParentAttachment", self.param[1], 0.01)
 				end,
-				function(self)
+				removeParent = function(self)
 					Ent_SetParent(self.ent)
-				end
+				end,
+				updateTransform = function(self)
+					local attach = Ent_GetAttachment(self.parent, self.param[2])
+					self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), attach.Pos, attach.Ang)
+				end,
+				applyTransform = function(self)
+					Ent_SetLocalPos(self.ent, self.pos)
+					Ent_SetLocalAngles(self.ent, self.ang)
+				end,
 			},
 			bone = {
-				function(self)
+				applyParent = function(self)
 					Ent_FollowBone(self.ent, self.parent, self.param)
+					self:applyTransform()
 				end,
-				function(self)
+				removeParent = function(self)
 					Ent_FollowBone(self.ent, NULL, 0)
-				end
+				end,
+				updateTransform = function(self)
+					local bonepos, boneang = Ent_GetBonePosition(self.parent, self.param)
+					self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), bonepos, boneang)
+				end,
+				applyTransform = function(self)
+					Ent_SetLocalPos(self.ent, self.pos)
+					Ent_SetLocalAngles(self.ent, self.ang)
+				end,
 			}
 		},
 
@@ -647,7 +671,7 @@ SF.Parent = {
 			if parent then
 				self.parent = parent
 				self.param = param
-				self.applyParent, self.removeParent = unpack(self.parentTypes[type])
+				setmetatable(self, self.parentTypes[type])
 
 				Ent_GetTable(parent).sfParent.children[self.ent] = self
 				self:updateTransform()
@@ -714,13 +738,21 @@ SF.Parent = {
 }
 setmetatable(SF.Parent, SF.Parent)
 
+setmetatable(SF.Parent.__index.parentTypes.entity, SF.Parent)
+SF.Parent.__index.parentTypes.entity.__index = SF.Parent.__index.parentTypes.entity
+
+setmetatable(SF.Parent.__index.parentTypes.attachment, SF.Parent)
+SF.Parent.__index.parentTypes.attachment.__index = SF.Parent.__index.parentTypes.attachment
+
+setmetatable(SF.Parent.__index.parentTypes.bone, SF.Parent)
+SF.Parent.__index.parentTypes.bone.__index = SF.Parent.__index.parentTypes.bone
+
 if CLIENT then
-	-- When parent is retransmitted, it loses it's children
-	hook.Add("NotifyShouldTransmit", "SF_HologramParentFix", function(ent)
-		local sfParent = Ent_GetTable(ent).sfParent
-		if sfParent then sfParent:fix() end
-	end)
-end
+-- When parent is retransmitted, it loses it's children
+hook.Add("NotifyShouldTransmit", "SF_HologramParentFix", function(ent)
+	local sfParent = Ent_GetTable(ent).sfParent
+	if sfParent then sfParent:fix() end
+end)
 
 SF.RenderStack = {
 	__index = {
@@ -771,6 +803,214 @@ SF.RenderStack = {
 }
 setmetatable(SF.RenderStack, SF.RenderStack)
 
+local USE_AWESOMIUM_HACK = BRANCH == "unknown" or BRANCH == "dev" or BRANCH == "prerelease"
+SF.HttpTextureRequest = {
+	__index = {
+		INIT=function(self, new) return new~=self.LOAD and new~=self.DESTROY end,
+		LOAD=function(self, new) return new~=self.FETCH and new~=self.LAYOUT and new~=self.DESTROY end,
+		FETCH=function(self, new) return new~=self.LOAD and new~=self.DESTROY end,
+		LAYOUT=function(self, new) return new~=self.RENDER and new~=self.LAYOUT and new~=self.DESTROY end,
+		RENDER=function(self, new) return new~=self.DESTROY end,
+		DESTROY=function(self, new) return true end,
+
+		badnewstate = function(self, new)
+			if (self.instance and self.instance.error) and new~=self.DESTROY then self:destroy() return true end
+			if self:state(new) then return true end
+			self.state = new
+			return false
+		end,
+
+		load = function(self, textureloader)
+			if textureloader then self.textureloader = textureloader end
+			if self:badnewstate(self.LOAD) then return end
+
+			if USE_AWESOMIUM_HACK and not string.match(self.url, "^data:") then
+				self:loadAwesomium()
+				return
+			end
+
+			self.textureloader.Panel:AddFunction("sf", "imageLoaded", function(w, h)
+				timer.Simple(0, function() self:layout(w, h) end)
+			end)
+			self.textureloader.Panel:AddFunction("sf", "imageErrored", function()
+				timer.Simple(0, function() self:destroy() end)
+			end)
+			self.textureloader.Panel:RunJavascript(
+			[[img.removeAttribute("width");
+			img.removeAttribute("height");
+			img.style.left="0px";
+			img.style.top="0px";
+			img.src="]] .. string.JavascriptSafe(self.url) .. [[";]]..
+			(BRANCH == "unknown" and "\nif(img.complete)renderImage();" or ""))
+		end,
+
+		loadAwesomium = function(self)
+			if self:badnewstate(self.FETCH) then return end
+
+			http.Fetch(self.url, function(body, _, headers, code)
+				if code >= 300 then self:destroy() return end
+
+				local content_type = headers["Content-Type"] or headers["content-type"]
+				local data = util.Base64Encode(body, true)
+				
+				self.url = table.concat({"data:", content_type, ";base64,", data})
+
+				self:load()
+			end, function() self:destroy() end)
+		end,
+
+		layout = function(self, w, h)
+			if self:badnewstate(self.LAYOUT) then return end
+
+			if self.usedlayout then self:render() return end
+
+			if self.callback then
+				self.callback(w, h, function(x,y,w,h,pixelated)
+					self:applyLayout(x,y,w,h,pixelated)
+				end)
+			end
+
+			if not self.usedlayout then
+				self.usedlayout = true
+				if self.texture then
+					self:render()
+				else
+					timer.Simple(0, function() self:destroy(true) end)
+				end
+			end
+		end,
+
+		applyLayout = function(self,x,y,w,h,pixelated)
+			if self.usedlayout then SF.Throw("You can only use layout once", 3) end
+			SF.CheckLuaType(x, TYPE_NUMBER, 2)
+			SF.CheckLuaType(y, TYPE_NUMBER, 2)
+			SF.CheckLuaType(w, TYPE_NUMBER, 2)
+			SF.CheckLuaType(h, TYPE_NUMBER, 2)
+			if pixelated~=nil then SF.CheckLuaType(pixelated, TYPE_BOOL, 2) end
+			self.usedlayout = true
+			self.textureloader.Panel:RunJavascript([[
+				img.style.left=']]..x..[[px';img.style.top=']]..y..[[px';img.width=]]..w..[[;img.height=]]..h..[[;img.style.imageRendering=']]..(pixelated and "pixelated" or "auto")..[[';
+				renderImage();
+			]])
+		end,
+
+		render = function(self)
+			if self:badnewstate(self.RENDER) then return end
+			local frame = 0
+			hook.Add("PreRender",self.renderstr,function()
+				self.textureloader.Panel:UpdateHTMLTexture()
+				-- Running UpdateHTMLTexture a few times seems to fix materials not rendering
+				if frame<2 then frame = frame + 1 return end
+				local mat = self.textureloader.Panel:GetHTMLMaterial()
+				if mat then
+					render.PushRenderTarget(self.texture)
+						render.Clear(0, 0, 0, 0, false, false)
+						cam.Start2D()
+						surface.SetMaterial(mat)
+						surface.SetDrawColor(255, 255, 255)
+						surface.DrawTexturedRect(0, 0, 1024, 1024)
+						cam.End2D()
+					render.PopRenderTarget()
+				end
+				hook.Remove("PreRender", self.renderstr)
+				timer.Simple(0, function() self:destroy(true) end)
+			end)
+		end,
+		
+		destroy = function(self, success)
+			if self:badnewstate(self.DESTROY) then return end
+			if success then
+				if self.donecallback then self.donecallback() end
+			else
+				if self.callback then self.callback() end
+			end
+			self.textureloader:pop()
+		end,
+	},
+	__call = function(t, url, instance, texture, callback, donecallback)
+		local ret = setmetatable({
+			url = url or error("Expected url input!"),
+			instance = instance or false,
+			texture = texture or false,
+			callback = callback or false,
+			donecallback = donecallback or false,
+			usedlayout = false,
+			state = t.INIT,
+		}, t)
+		ret.renderstr = "SF_HTMLPanelCopyTexture"..string.format("%p",ret)
+		return ret
+	end
+}
+setmetatable(SF.HttpTextureRequest, SF.HttpTextureRequest)
+
+SF.HttpTextureLoader = {
+	__index = {
+		initialize = function(self, request)
+			local Panel = vgui.Create("DHTML")
+			Panel:SetSize(1024, 1024)
+			Panel:SetMouseInputEnabled(false)
+			Panel:SetHTML(
+			[[<html style="overflow:hidden"><body><script>
+			if (!requestAnimationFrame)
+				var requestAnimationFrame = webkitRequestAnimationFrame;
+			function renderImage(){
+				requestAnimationFrame(function(){
+					requestAnimationFrame(function(){
+						document.body.offsetWidth
+						requestAnimationFrame(function(){
+							sf.imageLoaded(img.width, img.height);
+						});
+					});
+				});
+			}
+			var img = new Image();
+			img.style.position="absolute";
+			img.onload = renderImage;
+			img.onerror = function (){sf.imageErrored();}
+			document.body.appendChild(img);
+			</script></body></html>]])
+			Panel:Hide()
+			Panel.OnFinishLoadingDocument = function() self:nextRequest() end
+			self.Panel = Panel
+
+			self.queue[1] = request
+			self.request = self.request_postInit
+		end,
+		
+		request_postInit = function(self, request)
+			local len = #self.queue
+			self.queue[len + 1] = request
+			if len==0 then timer.Simple(0, function() self:nextRequest() end) end
+		end,
+
+		nextRequest = function(self)
+			local request = self.queue[1]
+			request:load(self)
+			timer.Create(self.timeoutstr, 10, 1, function() request:destroy() end)
+		end,
+
+		pop = function(self)
+			table.remove(self.queue, 1)
+			if #self.queue > 0 then
+				self:nextRequest()
+			else
+				timer.Remove(self.timeoutstr)
+			end
+		end
+	},
+	__call = function(p)
+		local ret = setmetatable({
+			queue = {},
+		}, p)
+		ret.request = ret.initialize
+		ret.timeoutstr = "SF_URLTextureTimeout"..string.format("%p",ret)
+		return ret
+	end
+}
+setmetatable(SF.HttpTextureLoader, SF.HttpTextureLoader)
+
+SF.G_HttpTextureLoader = SF.HttpTextureLoader()
+end
 
 -- Error type containing error info
 SF.Errormeta = {
@@ -778,6 +1018,11 @@ SF.Errormeta = {
 	__metatable = "SFError"
 }
 
+SF.AutoGrowingTable = {
+    __index = function(t,k) local r=SF.AutoGrowingTable() t[k]=r return r end,
+    __call = function(t) return setmetatable({}, SF.AutoGrowingTable) end
+}
+setmetatable(SF.AutoGrowingTable, SF.AutoGrowingTable)
 
 --- Builds an error type to that contains line numbers, file name, and traceback
 function SF.MakeError(msg, level, uncatchable, prependinfo, userdata)
@@ -1099,7 +1344,6 @@ end
 
 --- The safest write file function
 function SF.FileWrite(path, data)
-	path = SF.NormalizePath(path)
 	file.CreateDir(string.GetPathFromFilename( path ))
 	file.Write(path, data)
 	return file.Read(path)==data
@@ -1655,6 +1899,21 @@ function SF.clampPos(pos)
 	return pos
 end
 
+function SF.CheckVector(v)
+	if v[1]<-1e12 or v[1]>1e12 or v[1]~=v[1] or
+	   v[2]<-1e12 or v[2]>1e12 or v[2]~=v[2] or
+	   v[3]<-1e12 or v[3]>1e12 or v[3]~=v[3] then
+
+		SF.Throw("Input vector too large or NAN", 3)
+	end
+end
+
+function SF.CheckNumber(n)
+	if n<-1e12 or n>1e12 or n~=n then
+		SF.Throw("Input number too large or NAN", 3)
+	end
+end
+
 local dumbtrace = {
 	FractionLeftSolid = 0,
 	HitNonWorld       = true,
@@ -1681,18 +1940,6 @@ function SF.IsHUDActive(ent, ply)
 	local tbl = Ent_GetTable(ent) if tbl==nil then return end
 	tbl = tbl.ActiveHuds if tbl==nil then return end
 	return tbl[SERVER and (ply or error("Missing player arg")) or LocalPlayer()]
-end
-
--- ------------------------------------------------------------------------- --
---- Legacy deserializes an instance's code.
--- @return The table of filename = source entries
--- @return The main filename
-function SF.LegacyDeserializeCode(tbl)
-	local sources = {}
-	for filename, source in pairs(tbl.source) do
-		sources[filename] = string.gsub(source, "[" .. string.char(5) .. string.char(4) .. "]", { [string.char(5)[1]] = "\n", [string.char(4)[1]] = '"' })
-	end
-	return sources, tbl.mainfile
 end
 
 local soundsMap = {
@@ -2230,10 +2477,45 @@ do
 					files[name..":"..path] = file.Read(path, "LUA")
 				end
 				net.Start("sf_receivelibrary")
-				net.WriteStarfall({files = files, mainfile = name, proc = Entity(0), owner = Entity(0)})
+				net.WriteStarfall({files = files, mainfile = name})
 				net.Broadcast()
 			end
 		end)
+
+		-- For development. Generates the ENT locals used by the library
+		if game.SinglePlayer() then
+			concommand.Add("sf_printlibrarylocals", function(ply, com, arg)
+				if not arg[1] then print("Expected library path argument in 'starfall'") return end
+				local lib = file.Read("starfall/"..arg[1], "LUA")
+				if not lib then print("File not found: ".."\"starfall/"..arg[1].."\"") return end
+				local metas = {"Ent_","Ply_","Wep_","Veh_","Npc_","Phys_"}
+				local badfuncs = {"IsPlayer","IsWeapon","IsVehicle","IsNPC"}
+				for _, meta in ipairs(metas) do
+					local found = {}
+					for f in string.gmatch(lib, meta.."([%w_]+)%s*%b()") do
+						found[f] = true
+					end
+					if table.IsEmpty(found) then continue end
+
+					for _, v in ipairs(badfuncs) do
+						if found[v] then
+							print(meta..v.." needs to be handled differently")
+							found[v] = nil
+						end
+					end
+
+					local list = table.GetKeys(found)
+					table.sort(list)
+					local metatbl = string.upper(meta).."META"
+					local a, b = {}, {}
+					for i, method in ipairs(list) do
+						a[i] = meta..method
+						b[i] = metatbl.."."..method
+					end
+					print("local " .. table.concat(a, ",") .. " = " .. table.concat(b, ","))
+				end
+			end)
+		end
 
 	else
 		net.Receive("sf_receivelibrary", function(len)
